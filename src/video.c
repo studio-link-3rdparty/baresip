@@ -18,10 +18,6 @@
 #include "magic.h"
 
 
-enum {
-	MAX_MUTED_FRAMES = 3,
-};
-
 /** Video transmit parameters */
 enum {
 	MEDIA_POLL_RATE = 250,                 /**< in [Hz]             */
@@ -84,7 +80,6 @@ struct vtx {
 	struct vidsrc_st *vsrc;            /**< Video source              */
 	struct lock *lock_enc;             /**< Lock for encoder          */
 	struct vidframe *frame;            /**< Source frame              */
-	struct vidframe *mute_frame;       /**< Frame with muted video    */
 	struct lock *lock_tx;              /**< Protect the sendq         */
 	struct list sendq;                 /**< Tx-Queue (struct vidqent) */
 	struct tmr tmr_rtp;                /**< Timer for sending RTP     */
@@ -92,10 +87,8 @@ struct vtx {
 	struct list filtl;                 /**< Filters in encoding order */
 	enum vidfmt fmt;                   /**< Outgoing pixel format     */
 	char device[128];                  /**< Source device name        */
-	int muted_frames;                  /**< # of muted frames sent    */
 	uint32_t ts_offset;                /**< Random timestamp offset   */
 	bool picup;                        /**< Send picture update       */
-	bool muted;                        /**< Muted flag                */
 	int frames;                        /**< Number of frames sent     */
 	double efps;                       /**< Estimated frame-rate      */
 	uint64_t ts_base;                  /**< First RTP timestamp sent  */
@@ -308,7 +301,6 @@ static void video_destructor(void *arg)
 	mem_deref(vtx->vsrc);
 	lock_write_get(vtx->lock_enc);
 	mem_deref(vtx->frame);
-	mem_deref(vtx->mute_frame);
 	mem_deref(vtx->enc);
 	list_flush(&vtx->filtl);
 	lock_rel(vtx->lock_enc);
@@ -468,20 +460,14 @@ static void vidsrc_frame_handler(struct vidframe *frame, uint64_t timestamp,
 
 	MAGIC_CHECK(vtx->video);
 
+	lock_write_get(vtx->lock_enc);
 	++vtx->frames;
+	lock_rel(vtx->lock_enc);
 
 	++vtx->stats.src_frames;
 
-	/* Is the video muted? If so insert video mute image */
-	if (vtx->muted)
-		frame = vtx->mute_frame;
-
-	if (vtx->muted && vtx->muted_frames >= MAX_MUTED_FRAMES)
-		return;
-
 	/* Encode and send */
 	encode_rtp_send(vtx, frame, timestamp);
-	vtx->muted_frames++;
 }
 
 
@@ -669,6 +655,13 @@ static int video_stream_decode(struct vrx *vrx, const struct rtp_header *hdr,
 	if (!vidframe_isvalid(frame))
 		goto out;
 
+	if (!vrx->size.w) {
+		info("video: receiving with resolution %u x %u"
+		     " and format '%s'\n",
+		     frame->size.w, frame->size.h,
+		     vidfmt_name(frame->fmt));
+	}
+
 	vrx->size = frame->size;
 	vrx->fmt  = frame->fmt;
 
@@ -746,9 +739,12 @@ static void stream_recv_handler(const struct rtp_header *hdr,
 	int err;
 	(void)extv;
 	(void)extc;
-	(void)lostc;
 
 	MAGIC_CHECK(v);
+
+	/* in case of packet loss, we need to receive a new keyframe */
+	if (lostc)
+		request_picture_update(&v->vrx);
 
 	if (!mb)
 		goto out;
@@ -766,9 +762,10 @@ static void stream_recv_handler(const struct rtp_header *hdr,
 }
 
 
-static void rtcp_handler(struct rtcp_msg *msg, void *arg)
+static void rtcp_handler(struct stream *strm, struct rtcp_msg *msg, void *arg)
 {
 	struct video *v = arg;
+	(void)strm;
 
 	MAGIC_CHECK(v);
 
@@ -850,12 +847,14 @@ static int vrx_print_pipeline(struct re_printf *pf, const struct vrx *vrx)
 }
 
 
-int video_alloc(struct video **vp, const struct stream_param *stream_prm,
+int video_alloc(struct video **vp, struct list *streaml,
+		const struct stream_param *stream_prm,
 		const struct config *cfg,
-		struct call *call, struct sdp_session *sdp_sess, int label,
+		struct sdp_session *sdp_sess, int label,
 		const struct mnat *mnat, struct mnat_sess *mnat_sess,
 		const struct menc *menc, struct menc_sess *menc_sess,
 		const char *content, const struct list *vidcodecl,
+		const struct list *vidfiltl,
 		bool offerer,
 		video_err_h *errh, void *arg)
 {
@@ -875,8 +874,8 @@ int video_alloc(struct video **vp, const struct stream_param *stream_prm,
 	v->cfg = cfg->video;
 	tmr_init(&v->tmr);
 
-	err = stream_alloc(&v->strm, stream_prm,
-			   &cfg->avt, call, sdp_sess, MEDIA_VIDEO, label,
+	err = stream_alloc(&v->strm, streaml, stream_prm,
+			   &cfg->avt, sdp_sess, MEDIA_VIDEO, label,
 			   mnat, mnat_sess, menc, menc_sess, offerer,
 			   stream_recv_handler, rtcp_handler, v);
 	if (err)
@@ -884,6 +883,8 @@ int video_alloc(struct video **vp, const struct stream_param *stream_prm,
 
 	if (vidisp_find(baresip_vidispl(), NULL) == NULL)
 		sdp_media_set_ldir(v->strm->sdp, SDP_SENDONLY);
+
+	stream_set_srate(v->strm, VIDEO_SRATE, VIDEO_SRATE);
 
 	if (cfg->avt.rtp_bw.max >= AUDIO_BANDWIDTH) {
 		stream_set_bw(v->strm, cfg->avt.rtp_bw.max - AUDIO_BANDWIDTH);
@@ -923,7 +924,7 @@ int video_alloc(struct video **vp, const struct stream_param *stream_prm,
 	}
 
 	/* Video filters */
-	for (le = list_head(baresip_vidfiltl()); le; le = le->next) {
+	for (le = list_head(vidfiltl); le; le = le->next) {
 		struct vidfilt *vf = le->data;
 		struct vidfilt_prm prm;
 		void *ctx = NULL;
@@ -969,7 +970,7 @@ static int set_vidisp(struct vrx *vrx)
 	struct vidisp *vd;
 
 	vrx->vidisp = mem_deref(vrx->vidisp);
-	vrx->vidisp_prm.view = NULL;
+
 	vrx->vidisp_prm.fullscreen = vrx->video->cfg.fullscreen;
 
 	vd = (struct vidisp *)vidisp_find(baresip_vidispl(),
@@ -1007,13 +1008,6 @@ static int set_encoder_format(struct vtx *vtx, const char *src,
 		return err;
 	}
 
-	vtx->mute_frame = mem_deref(vtx->mute_frame);
-	err = vidframe_alloc(&vtx->mute_frame, vtx->video->cfg.enc_fmt, size);
-	if (err)
-		return err;
-
-	vidframe_fill(vtx->mute_frame, 0xff, 0xff, 0xff);
-
 	return err;
 }
 
@@ -1027,12 +1021,17 @@ static void tmr_handler(void *arg)
 
 	tmr_start(&v->tmr, TMR_INTERVAL * 1000, tmr_handler, v);
 
+	/* protect vtx.frames */
+	lock_write_get(v->vtx.lock_enc);
+
 	/* Estimate framerates */
 	v->vtx.efps = (double)v->vtx.frames / (double)TMR_INTERVAL;
 	v->vrx.efps = (double)v->vrx.frames / (double)TMR_INTERVAL;
 
 	v->vtx.frames = 0;
 	v->vrx.frames = 0;
+
+	lock_rel(v->vtx.lock_enc);
 }
 
 
@@ -1045,13 +1044,11 @@ int video_start(struct video *v, const char *peer)
 		return EINVAL;
 
 	if (peer) {
-		mem_deref(v->peer);
+		v->peer = mem_deref(v->peer);
 		err = str_dup(&v->peer, peer);
 		if (err)
 			return err;
 	}
-
-	stream_set_srate(v->strm, VIDEO_SRATE, VIDEO_SRATE);
 
 	if (vidisp_find(baresip_vidispl(), NULL)) {
 		err = set_vidisp(&v->vrx);
@@ -1108,29 +1105,6 @@ void video_stop(struct video *v)
 bool video_is_started(const struct video *v)
 {
 	return v ? v->started : false;
-}
-
-
-/**
- * Mute the video stream
- *
- * @param v     Video stream
- * @param muted True to mute, false to un-mute
- */
-void video_mute(struct video *v, bool muted)
-{
-	struct vtx *vtx;
-
-	if (!v)
-		return;
-
-	vtx = &v->vtx;
-
-	vtx->muted        = muted;
-	vtx->muted_frames = 0;
-	vtx->picup        = true;
-
-	video_update_picture(v);
 }
 
 
@@ -1237,7 +1211,7 @@ int video_decoder_set(struct video *v, struct vidcodec *vc, int pt_rx,
 
 	/* handle vidcodecs without a decoder */
 	if (!vc->decupdh) {
-		struct list *vidcodecl = baresip_vidcodecl();
+		struct list *vidcodecl = vc->le.list;
 		struct vidcodec *vcd;
 
 		info("video: vidcodec '%s' has no decoder\n", vc->name);
@@ -1312,11 +1286,12 @@ void video_vidsrc_set_device(struct video *v, const char *dev)
 }
 
 
-static bool sdprattr_contains(struct stream *s, const char *name,
-			      const char *str)
+static bool nack_handler(const char *name, const char *value, void *arg)
 {
-	const char *attr = sdp_media_rattr(stream_sdpmedia(s), name);
-	return attr ? (NULL != strstr(attr, str)) : false;
+	(void)name;
+	(void)arg;
+
+	return 0 == re_regex(value, str_len(value), "nack");
 }
 
 
@@ -1326,7 +1301,8 @@ void video_sdp_attr_decode(struct video *v)
 		return;
 
 	/* RFC 4585 */
-	v->nack_pli = sdprattr_contains(v->strm, "rtcp-fb", "nack");
+	if (sdp_media_rattr_apply(v->strm->sdp, "rtcp-fb", nack_handler, 0))
+		v->nack_pli = true;
 }
 
 
@@ -1412,10 +1388,10 @@ int video_debug(struct re_printf *pf, const struct video *v)
 	if (err)
 		return err;
 
-	if (!list_isempty(baresip_vidfiltl())) {
+	if (!list_isempty(&vtx->filtl))
 		err |= vtx_print_pipeline(pf, vtx);
+	if (!list_isempty(&vrx->filtl))
 		err |= vrx_print_pipeline(pf, vrx);
-	}
 
 	err |= stream_debug(pf, v->strm);
 
@@ -1477,4 +1453,13 @@ void video_set_devicename(struct video *v, const char *src, const char *disp)
 
 	str_ncpy(v->vtx.device, src, sizeof(v->vtx.device));
 	str_ncpy(v->vrx.device, disp, sizeof(v->vrx.device));
+}
+
+
+const struct vidcodec *video_codec(const struct video *vid, bool tx)
+{
+	if (!vid)
+		return NULL;
+
+	return tx ? vid->vtx.vc : vid->vrx.vc;
 }

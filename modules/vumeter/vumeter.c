@@ -45,20 +45,7 @@ static bool vumeter_stderr;
 
 static void send_event(const struct audio *au, enum ua_event ev, double value)
 {
-	struct stream *strm;
-	struct call *call;
-	struct ua *ua;
-
-	/* get the stream from the audio object */
-	strm = audio_strm(au);
-
-	/* get the call from the stream object */
-	call = stream_call(strm);
-
-	/* get the useragent from the call object */
-	ua = call_get_ua(call);
-
-	ua_event(ua, ev, call, "%.2f", value);
+	audio_level_put(au, ev == UA_EVENT_VU_TX, value);
 }
 
 
@@ -224,7 +211,11 @@ static int decode(struct aufilt_dec_st *st, void *sampv, size_t *sampc)
 
 
 static struct aufilt vumeter = {
-	LE_INIT, "vumeter", encode_update, encode, decode_update, decode
+	.name    = "vumeter",
+	.encupdh = encode_update,
+	.ench    = encode,
+	.decupdh = decode_update,
+	.dech    = decode
 };
 
 

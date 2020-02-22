@@ -181,6 +181,7 @@ struct audio {
 	bool hold;                    /**< Local hold flag                 */
 	unsigned extmap_aulevel;      /**< ID Range 1-14 inclusive         */
 	audio_event_h *eventh;        /**< Event handler                   */
+	audio_level_h *levelh;        /**< Audio level handler             */
 	audio_err_h *errh;            /**< Audio error handler             */
 	void *arg;                    /**< Handler argument                */
 };
@@ -382,6 +383,7 @@ static void encode_rtp_send(struct audio *a, struct autx *tx,
 	size_t len;
 	size_t ext_len = 0;
 	uint32_t ts_delta = 0;
+	bool marker = tx->marker;
 	int err;
 
 	if (!tx->ac || !tx->ac->ench)
@@ -413,7 +415,7 @@ static void encode_rtp_send(struct audio *a, struct autx *tx,
 
 	len = mbuf_get_space(tx->mb);
 
-	err = tx->ac->ench(tx->enc, mbuf_buf(tx->mb), &len,
+	err = tx->ac->ench(tx->enc, &marker, mbuf_buf(tx->mb), &len,
 			   tx->enc_fmt, sampv, sampc);
 
 	if ((err & 0xffff0000) == 0x00010000) {
@@ -437,7 +439,7 @@ static void encode_rtp_send(struct audio *a, struct autx *tx,
 		uint32_t rtp_ts = tx->ts_ext & 0xffffffff;
 
 		if (len) {
-			err = stream_send(a->strm, ext_len!=0, tx->marker, -1,
+			err = stream_send(a->strm, ext_len!=0, marker, -1,
 					  rtp_ts, tx->mb);
 			if (err)
 				goto out;
@@ -720,7 +722,8 @@ static void handle_telev(struct audio *a, struct mbuf *mb)
 }
 
 
-static int aurx_stream_decode(struct aurx *rx, struct mbuf *mb, unsigned lostc)
+static int aurx_stream_decode(struct aurx *rx, bool marker,
+			      struct mbuf *mb, unsigned lostc)
 {
 	size_t sampc = AUDIO_SAMPSZ;
 	void *sampv;
@@ -746,7 +749,7 @@ static int aurx_stream_decode(struct aurx *rx, struct mbuf *mb, unsigned lostc)
 
 		err = rx->ac->dech(rx->dec,
 				   rx->dec_fmt, rx->sampv, &sampc,
-				   mbuf_buf(mb), mbuf_get_left(mb));
+				   marker, mbuf_buf(mb), mbuf_get_left(mb));
 		if (err) {
 			warning("audio: %s codec decode %u bytes: %m\n",
 				rx->ac->name, mbuf_get_left(mb), err);
@@ -972,9 +975,9 @@ static void stream_recv_handler(const struct rtp_header *hdr,
 
  out:
 	if (lostc)
-		aurx_stream_decode(&a->rx, mb, lostc);
+		aurx_stream_decode(&a->rx, hdr->m, mb, lostc);
 
-	(void)aurx_stream_decode(&a->rx, mb, 0);
+	(void)aurx_stream_decode(&a->rx, hdr->m, mb, 0);
 }
 
 
@@ -996,114 +999,14 @@ static int add_telev_codec(struct audio *a)
 }
 
 
-/*
- * EBU ACIP (Audio Contribution over IP) Profile
- *
- * Ref: https://tech.ebu.ch/docs/tech/tech3368.pdf
- */
-static int set_ebuacip_params(struct audio *au, uint32_t ptime)
-{
-	struct sdp_media *sdp = stream_sdpmedia(au->strm);
-	const struct config_avt *avt = &au->strm->cfg;
-	char str[64];
-	int jbvalue = 0;
-	int jb_id = 0;
-	int err = 0;
-
-	/* set ebuacip version fixed value 0 for now. */
-	err |= sdp_media_set_lattr(sdp, false, "ebuacip", "version %i", 0);
-
-	/* set jb option, only one in our case */
-	err |= sdp_media_set_lattr(sdp, false, "ebuacip", "jb %i", jb_id);
-
-	/* define jb value in option */
-	if (0 == conf_get_str(conf_cur(), "ebuacip_jb_type",str,sizeof(str))) {
-
-		if (0 == str_cmp(str, "auto")) {
-
-			err |= sdp_media_set_lattr(sdp, false,
-						   "ebuacip",
-						   "jbdef %i auto %d-%d",
-						   jb_id,
-						   avt->jbuf_del.min * ptime,
-						   avt->jbuf_del.max * ptime);
-		}
-		else if (0 == str_cmp(str, "fixed")) {
-
-			/* define jb value in option */
-			jbvalue = avt->jbuf_del.max * ptime;
-
-			err |= sdp_media_set_lattr(sdp, false,
-						   "ebuacip",
-						   "jbdef %i fixed %d",
-						   jb_id, jbvalue);
-		}
-	}
-
-	/* set QOS recomendation use tos / 4 to set DSCP value */
-	err |= sdp_media_set_lattr(sdp, false, "ebuacip", "qosrec %u",
-				   avt->rtp_tos / 4);
-
-	/* EBU ACIP FEC:: NOT SET IN BARESIP */
-
-	return err;
-}
-
-
-static bool ebuacip_handler(const char *name, const char *value, void *arg)
-{
-	struct sdp_media *sdp;
-	struct audio *au = arg;
-	struct aurx *rx = &au->rx;
-	struct pl type, val;
-	uint32_t frames;
-	(void)name;
-
-	if (0 == re_regex(value, str_len(value),
-		"jbdef [0-9]+ [^ ]+ [0-9]+",
-		NULL, &type, &val)) {
-
-		frames = pl_u32(&val) / rx->ptime;
-
-		if (0 == pl_strcasecmp(&type, "fixed")) {
-
-			uint32_t frames_min;
-
-			/*
-			fixed jb, set to frames -1 as min and frames as max.
-			*/
-
-			if (frames > 1)
-				frames_min = frames - 1;
-			else
-				frames_min = 1;
-
-			stream_jbuf_reset(au->strm, frames_min, frames);
-		}
-		else if (0 == pl_strcasecmp(&type, "auto")) {
-			/*
-			at the moment only min value is known,
-			therefor max value is here set to 2 times min value
-			This needs to be addressed later
-			*/
-			stream_jbuf_reset(au->strm, frames, frames*2);
-		}
-
-		sdp = stream_sdpmedia(au->strm);
-		sdp_media_del_lattr(sdp, "ebuacip");
-	}
-
-	return false;
-}
-
-
 /**
  * Allocate an audio stream
  *
  * @param ap         Pointer to allocated audio stream object
+ * @param streaml    List of streams
  * @param stream_prm Stream parameters
  * @param cfg        Global configuration
- * @param call       Call object
+ * @param acc        User-Agent account
  * @param sdp_sess   SDP Session
  * @param label      SDP label
  * @param mnat       Media NAT (optional)
@@ -1114,24 +1017,27 @@ static bool ebuacip_handler(const char *name, const char *value, void *arg)
  * @param aucodecl   List of audio codecs
  * @param offerer    True if SDP offerer, false if SDP answerer
  * @param eventh     Event handler
+ * @param levelh     Audio level handler
  * @param errh       Error handler
  * @param arg        Handler argument
  *
  * @return 0 if success, otherwise errorcode
  */
-int audio_alloc(struct audio **ap, const struct stream_param *stream_prm,
+int audio_alloc(struct audio **ap, struct list *streaml,
+		const struct stream_param *stream_prm,
 		const struct config *cfg,
-		struct call *call, struct sdp_session *sdp_sess, int label,
+		struct account *acc, struct sdp_session *sdp_sess, int label,
 		const struct mnat *mnat, struct mnat_sess *mnat_sess,
 		const struct menc *menc, struct menc_sess *menc_sess,
 		uint32_t ptime, const struct list *aucodecl, bool offerer,
-		audio_event_h *eventh, audio_err_h *errh, void *arg)
+		audio_event_h *eventh, audio_level_h *levelh,
+		audio_err_h *errh, void *arg)
 {
-	struct account *acc;
 	struct audio *a;
 	struct autx *tx;
 	struct aurx *rx;
 	struct le *le;
+	uint32_t minptime = ptime;
 	int err;
 
 	if (!ap || !cfg)
@@ -1159,7 +1065,8 @@ int audio_alloc(struct audio **ap, const struct stream_param *stream_prm,
 	tx->enc_fmt = cfg->audio.enc_fmt;
 	rx->dec_fmt = cfg->audio.dec_fmt;
 
-	err = stream_alloc(&a->strm, stream_prm, &cfg->avt, call, sdp_sess,
+	err = stream_alloc(&a->strm, streaml,
+			   stream_prm, &cfg->avt, sdp_sess,
 			   MEDIA_AUDIO, label,
 			   mnat, mnat_sess, menc, menc_sess, offerer,
 			   stream_recv_handler, NULL, a);
@@ -1170,8 +1077,23 @@ int audio_alloc(struct audio **ap, const struct stream_param *stream_prm,
 		stream_set_bw(a->strm, AUDIO_BANDWIDTH);
 	}
 
-	err = sdp_media_set_lattr(stream_sdpmedia(a->strm), true,
-				  "ptime", "%u", ptime);
+	/* Audio codecs */
+	for (le = list_head(aucodecl); le; le = le->next) {
+
+		struct aucodec *ac = le->data;
+
+		if (ac->ptime)
+			minptime = min(minptime, ac->ptime);
+
+		err = add_audio_codec(stream_sdpmedia(a->strm), ac);
+		if (err)
+			goto out;
+	}
+
+	err  = sdp_media_set_lattr(stream_sdpmedia(a->strm), true,
+				   "minptime", "%u", minptime);
+	err |= sdp_media_set_lattr(stream_sdpmedia(a->strm), true,
+				   "ptime", "%u", ptime);
 	if (err)
 		goto out;
 
@@ -1183,20 +1105,6 @@ int audio_alloc(struct audio **ap, const struct stream_param *stream_prm,
 					  "extmap",
 					  "%u %s",
 					  a->extmap_aulevel, uri_aulevel);
-		if (err)
-			goto out;
-	}
-
-	if (cfg->sdp.ebuacip) {
-
-		err = set_ebuacip_params(a, ptime);
-		if (err)
-			goto out;
-	}
-
-	/* Audio codecs */
-	for (le = list_head(aucodecl); le; le = le->next) {
-		err = add_audio_codec(stream_sdpmedia(a->strm), le->data);
 		if (err)
 			goto out;
 	}
@@ -1222,7 +1130,6 @@ int audio_alloc(struct audio **ap, const struct stream_param *stream_prm,
 
 	auresamp_init(&tx->resamp);
 
-	acc = call_account(call);
 	if (acc && acc->ausrc_mod) {
 
 		tx->module = mem_ref(acc->ausrc_mod);
@@ -1259,6 +1166,7 @@ int audio_alloc(struct audio **ap, const struct stream_param *stream_prm,
 	rx->ptime  = ptime;
 
 	a->eventh  = eventh;
+	a->levelh  = levelh;
 	a->errh    = errh;
 	a->arg     = arg;
 
@@ -1337,7 +1245,7 @@ static int autx_print_pipeline(struct re_printf *pf, const struct autx *autx)
 		return 0;
 
 	err = re_hprintf(pf, "audio tx pipeline:  %10s",
-			 autx->ausrc ? autx->ausrc->as->name : "src");
+			 autx->ausrc ? autx->ausrc->as->name : "(src)");
 
 	for (le = list_head(&autx->filtl); le; le = le->next) {
 		struct aufilt_enc_st *st = le->data;
@@ -1347,7 +1255,7 @@ static int autx_print_pipeline(struct re_printf *pf, const struct autx *autx)
 	}
 
 	err |= re_hprintf(pf, " ---> %s\n",
-			  autx->ac ? autx->ac->name : "encoder");
+			  autx->ac ? autx->ac->name : "(encoder)");
 
 	return err;
 }
@@ -1362,7 +1270,7 @@ static int aurx_print_pipeline(struct re_printf *pf, const struct aurx *aurx)
 		return 0;
 
 	err = re_hprintf(pf, "audio rx pipeline:  %10s",
-			 aurx->auplay ? aurx->auplay->ap->name : "play");
+			 aurx->auplay ? aurx->auplay->ap->name : "(play)");
 
 	for (le = list_head(&aurx->filtl); le; le = le->next) {
 		struct aufilt_dec_st *st = le->data;
@@ -1372,7 +1280,7 @@ static int aurx_print_pipeline(struct re_printf *pf, const struct aurx *aurx)
 	}
 
 	err |= re_hprintf(pf, " <--- %s\n",
-			  aurx->ac ? aurx->ac->name : "decoder");
+			  aurx->ac ? aurx->ac->name : "(decoder)");
 
 	return err;
 }
@@ -1503,17 +1411,31 @@ static int start_player(struct aurx *rx, struct audio *a)
 		prm.fmt        = rx->play_fmt;
 
 		if (!rx->aubuf) {
-			size_t psize;
-			size_t sz = aufmt_sample_size(rx->play_fmt);
+			const size_t sz = aufmt_sample_size(rx->play_fmt);
+			const size_t ptime_min = a->cfg.buffer.min;
+			const size_t ptime_max = a->cfg.buffer.max;
+			size_t min_sz;
+			size_t max_sz;
 
-			psize = sz * calc_nsamp(prm.srate, prm.ch, prm.ptime);
+			if (!ptime_min || !ptime_max)
+				return EINVAL;
 
-			rx->aubuf_maxsz = psize * 8;
+			min_sz = sz*calc_nsamp(prm.srate, prm.ch, ptime_min);
+			max_sz = sz*calc_nsamp(prm.srate, prm.ch, ptime_max);
 
-			err = aubuf_alloc(&rx->aubuf, psize * 1,
-					  rx->aubuf_maxsz);
-			if (err)
+			debug("audio: create recv buffer"
+			      " [%zu - %zu ms]"
+			      " [%zu - %zu bytes]\n",
+			      ptime_min, ptime_max, min_sz, max_sz);
+
+			err = aubuf_alloc(&rx->aubuf, min_sz, max_sz);
+			if (err) {
+				warning("audio: aubuf alloc error (%m)\n",
+					err);
 				return err;
+			}
+
+			rx->aubuf_maxsz = max_sz;
 		}
 
 		err = auplay_alloc(&rx->auplay, baresip_auplayl(),
@@ -1627,7 +1549,7 @@ static int start_source(struct autx *tx, struct audio *a)
 				err = pthread_create(&tx->u.thr.tid, NULL,
 						     tx_thread, a);
 				if (err) {
-					tx->u.thr.tid = false;
+					tx->u.thr.run = false;
 					return err;
 				}
 			}
@@ -1673,15 +1595,8 @@ int audio_start(struct audio *a)
 			return err;
 	}
 
-	/* configurable order of play/src start */
-	if (a->cfg.src_first) {
-		err  = start_source(&a->tx, a);
-		err |= start_player(&a->rx, a);
-	}
-	else {
-		err  = start_player(&a->rx, a);
-		err |= start_source(&a->tx, a);
-	}
+	err  = start_player(&a->rx, a);
+	err |= start_source(&a->tx, a);
 	if (err)
 		return err;
 
@@ -1786,6 +1701,14 @@ int audio_encoder_set(struct audio *a, const struct aucodec *ac,
 	stream_update_encoder(a->strm, pt_tx);
 
 	telev_set_srate(a->telev, ac->crate);
+
+	/* use a codec-specific ptime */
+	if (ac->ptime) {
+		const size_t sz = aufmt_sample_size(tx->src_fmt);
+
+		tx->ptime = ac->ptime;
+		tx->psize = sz * calc_nsamp(ac->srate, ac->ch, ac->ptime);
+	}
 
 	if (!tx->ausrc) {
 		err |= audio_start(a);
@@ -2011,19 +1934,22 @@ void audio_sdp_attr_decode(struct audio *a)
 		}
 	}
 
-	/*
-	 * EBUACIP handler
-	 * EBU TECH 3368 profile provisioning on incoming invite.
-	 */
-	sdp_media_rattr_apply(stream_sdpmedia(a->strm), "ebuacip",
-			      ebuacip_handler, a);
-
 	/* Client-to-Mixer Audio Level Indication */
 	if (a->cfg.level) {
 		sdp_media_rattr_apply(stream_sdpmedia(a->strm),
 				      "extmap",
 				      extmap_handler, a);
 	}
+}
+
+
+void audio_level_put(const struct audio *au, bool tx, double lvl)
+{
+	if (!au)
+		return;
+
+	if (au->levelh)
+		au->levelh(tx, lvl, au->arg);
 }
 
 
@@ -2261,72 +2187,6 @@ int audio_set_player(struct audio *au, const char *mod, const char *device)
 }
 
 
-/*
- * Reference:
- *
- * https://www.avm.de/de/Extern/files/x-rtp/xrtpv32.pdf
- */
-int audio_print_rtpstat(struct re_printf *pf, const struct audio *a)
-{
-	const struct stream *s;
-	const struct rtcp_stats *rtcp;
-	int srate_tx = 8000;
-	int srate_rx = 8000;
-	int err;
-
-	if (!a)
-		return 1;
-
-	s = a->strm;
-	rtcp = &s->rtcp_stats;
-
-	if (!rtcp->tx.sent)
-		return 1;
-
-	if (a->tx.ac)
-		srate_tx = a->tx.ac->srate;
-	if (a->rx.ac)
-		srate_rx = a->rx.ac->srate;
-
-	err = re_hprintf(pf,
-			 "EX=BareSip;"   /* Reporter Identifier	             */
-			 "CS=%d;"        /* Call Setup in milliseconds       */
-			 "CD=%d;"        /* Call Duration in seconds	     */
-			 "PR=%u;PS=%u;"  /* Packets RX, TX                   */
-			 "PL=%d,%d;"     /* Packets Lost RX, TX              */
-			 "PD=%d,%d;"     /* Packets Discarded, RX, TX        */
-			 "JI=%.1f,%.1f;" /* Jitter RX, TX in timestamp units */
-			 "IP=%J,%J"      /* Local, Remote IPs                */
-			 ,
-			 call_setup_duration(s->call) * 1000,
-			 call_duration(s->call),
-
-			 s->metric_rx.n_packets,
-			 s->metric_tx.n_packets,
-
-			 rtcp->rx.lost, rtcp->tx.lost,
-
-			 s->metric_rx.n_err, s->metric_tx.n_err,
-
-			 /* timestamp units (ie: 8 ts units = 1 ms @ 8KHZ) */
-			 1.0 * rtcp->rx.jit/1000 * (srate_rx/1000),
-			 1.0 * rtcp->tx.jit/1000 * (srate_tx/1000),
-
-			 sdp_media_laddr(s->sdp),
-			 sdp_media_raddr(s->sdp)
-			 );
-
-	if (a->tx.ac) {
-		err |= re_hprintf(pf, ";EN=%s/%d", a->tx.ac->name, srate_tx );
-	}
-	if (a->rx.ac) {
-		err |= re_hprintf(pf, ";DE=%s/%d", a->rx.ac->name, srate_rx );
-	}
-
-	return err;
-}
-
-
 /**
  * Set the bitrate for the audio encoder
  *
@@ -2425,4 +2285,17 @@ const struct aucodec *audio_codec(const struct audio *au, bool tx)
 		return NULL;
 
 	return tx ? au->tx.ac : au->rx.ac;
+}
+
+
+/**
+ * Accessor function to audio configuration
+ *
+ * @param au Audio object
+ *
+ * @return Audio configuration
+ */
+struct config_audio *audio_config(struct audio *au)
+{
+	return au ? &au->cfg : NULL;
 }

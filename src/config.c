@@ -43,13 +43,13 @@ static struct config core_config = {
 		0,
 		0,
 		0,
-		false,
 		AUDIO_MODE_POLL,
 		false,
 		AUFMT_S16LE,
 		AUFMT_S16LE,
 		AUFMT_S16LE,
 		AUFMT_S16LE,
+		{20, 160},
 	},
 
 	/** Video */
@@ -76,15 +76,10 @@ static struct config core_config = {
 
 	/* Network */
 	{
-		false,
+		AF_UNSPEC,
 		"",
 		{ {""} },
 		0
-	},
-
-	/* SDP */
-	{
-		false
 	},
 };
 
@@ -198,10 +193,11 @@ static int conf_get_vidfmt(const struct conf *conf, const char *name,
  */
 int config_parse_conf(struct config *cfg, const struct conf *conf)
 {
-	struct pl pollm, as, ap;
+	struct pl pollm;
 	enum poll_method method;
 	struct vidsz size = {0, 0};
 	struct pl txmode;
+	bool prefer_ipv6 = false;
 	uint32_t v;
 	int err = 0;
 
@@ -260,10 +256,6 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 	(void)conf_get_u32(conf, "ausrc_channels", &cfg->audio.channels_src);
 	(void)conf_get_u32(conf, "auplay_channels", &cfg->audio.channels_play);
 
-	if (0 == conf_get(conf, "audio_source", &as) &&
-	    0 == conf_get(conf, "audio_player", &ap))
-		cfg->audio.src_first = as.p < ap.p;
-
 	if (0 == conf_get(conf, "audio_txmode", &txmode)) {
 
 		if (0 == pl_strcasecmp(&txmode, "poll"))
@@ -281,6 +273,12 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 	conf_get_aufmt(conf, "auplay_format", &cfg->audio.play_fmt);
 	conf_get_aufmt(conf, "auenc_format", &cfg->audio.enc_fmt);
 	conf_get_aufmt(conf, "audec_format", &cfg->audio.dec_fmt);
+
+	conf_get_range(conf, "audio_buffer", &cfg->audio.buffer);
+	if (!cfg->audio.buffer.min || !cfg->audio.buffer.max) {
+		warning("config: audio_buffer cannot be zero\n");
+		return EINVAL;
+	}
 
 	/* Video */
 	(void)conf_get_csv(conf, "video_source",
@@ -321,14 +319,12 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 
 	/* Network */
 #if HAVE_INET6
-	(void)conf_get_bool(conf, "net_prefer_ipv6", &cfg->net.prefer_ipv6);
+	if (0 == conf_get_bool(conf, "net_prefer_ipv6", &prefer_ipv6))
+		info("config: net_prefer_ipv6 ignored\n");
 #endif
 	(void)conf_apply(conf, "dns_server", dns_server_handler, &cfg->net);
 	(void)conf_get_str(conf, "net_interface",
 			   cfg->net.ifname, sizeof(cfg->net.ifname));
-
-	/* SDP */
-	(void)conf_get_bool(conf, "sdp_ebuacip", &cfg->sdp.ebuacip);
 
 	return err;
 }
@@ -390,7 +386,6 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 "rtp_timeout\t\t%u # in seconds\n"
 			 "\n"
 			 "# Network\n"
-			 "net_prefer_ipv6\t\t%s\n"
 			 "net_interface\t\t%s\n"
 			 "\n"
 			 ,
@@ -423,7 +418,6 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 cfg->avt.rtp_stats ? "yes" : "no",
 			 cfg->avt.rtp_timeout,
 
-			 cfg->net.prefer_ipv6 ? "yes" : "no",
 			 cfg->net.ifname
 		   );
 
@@ -561,6 +555,7 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "auplay_format\t\ts16\t\t# s16, float, ..\n"
 			  "auenc_format\t\ts16\t\t# s16, float, ..\n"
 			  "audec_format\t\ts16\t\t# s16, float, ..\n"
+			  "audio_buffer\t\t%H\t\t# ms\n"
 			  ,
 			  poll_method_name(poll_method_best()),
 			  default_cafile(),
@@ -568,7 +563,8 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  cfg->call.max_calls,
 			  default_audio_device(),
 			  default_audio_device(),
-			  default_audio_device());
+			  default_audio_device(),
+			  range_print, &cfg->audio.buffer);
 
 	err |= re_hprintf(pf,
 			  "\n# Video\n"
@@ -596,7 +592,6 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "rtp_stats\t\tno\n"
 			  "#rtp_timeout\t\t60\n"
 			  "\n# Network\n"
-			  "net_prefer_ipv6\t\tno\n"
 			  "#dns_server\t\t1.1.1.1:53\n"
 			  "#dns_server\t\t1.0.0.1:53\n"
 			  "#net_interface\t\t%H\n",
@@ -844,9 +839,6 @@ int config_write_template(const char *file, const struct config *cfg)
 	(void)re_fprintf(f, "#module_app\t\t" "b2bua"MOD_EXT"\n");
 	(void)re_fprintf(f, "module_app\t\t"  "contact"MOD_EXT"\n");
 	(void)re_fprintf(f, "module_app\t\t"  "debug_cmd"MOD_EXT"\n");
-#ifdef LINUX
-	(void)re_fprintf(f, "#module_app\t\t"  "dtmfio"MOD_EXT"\n");
-#endif
 	(void)re_fprintf(f, "#module_app\t\t"  "echo"MOD_EXT"\n");
 	(void)re_fprintf(f, "#module_app\t\t" "gtk" MOD_EXT "\n");
 	(void)re_fprintf(f, "module_app\t\t"  "menu"MOD_EXT"\n");
@@ -899,6 +891,9 @@ int config_write_template(const char *file, const struct config *cfg)
 	(void)re_fprintf(f, "\n");
 	(void)re_fprintf(f, "vumeter_stderr\t\tyes\n");
 
+	(void)re_fprintf(f, "\n");
+	(void)re_fprintf(f, "#jack_connect_ports\tyes\n");
+
 	(void)re_fprintf(f,
 			"\n# Selfview\n"
 			"video_selfview\t\twindow # {window,pip}\n"
@@ -906,7 +901,6 @@ int config_write_template(const char *file, const struct config *cfg)
 
 	(void)re_fprintf(f,
 			"\n# ICE\n"
-			"ice_turn\t\tno\n"
 			"ice_debug\t\tno\n"
 			"ice_nomination\t\tregular\t# {regular,aggressive}\n");
 
