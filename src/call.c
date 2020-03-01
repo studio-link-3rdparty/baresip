@@ -46,6 +46,7 @@ struct call {
 	struct list streaml;      /**< List of mediastreams (struct stream) */
 	struct audio *audio;      /**< Audio stream                         */
 	struct video *video;      /**< Video stream                         */
+	struct media_ctx *ctx;
 	enum state state;         /**< Call state                           */
 	char *local_uri;          /**< Local SIP uri                        */
 	char *local_name;         /**< Local display name                   */
@@ -182,9 +183,15 @@ static int start_video(struct call *call)
 					 sc->params);
 		err |= video_decoder_set(call->video, sc->data, sc->pt,
 					 sc->rparams);
-		if (!err && !video_is_started(call->video)) {
-			err = video_start(call->video, call->peer_uri);
+		if (err)
+			return err;
+
+		if (!video_is_started(call->video)) {
+			err  = video_start_display(call->video,
+						   call->peer_uri);
+			err |= video_start_source(call->video, &call->ctx);
 		}
+
 		if (err) {
 			warning("call: video stream error: %m\n", err);
 		}
@@ -366,7 +373,9 @@ static int update_video(struct call *call)
 		}
 
 		if (!video_is_started(call->video)) {
-			err = video_start(call->video, call->peer_uri);
+			err  = video_start_display(call->video,
+						   call->peer_uri);
+			err |= video_start_source(call->video, &call->ctx);
 			if (err) {
 				warning("call: update: failed to"
 					" start video (%m)\n", err);
@@ -775,6 +784,8 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 			  audio_error_handler, call);
 	if (err)
 		goto out;
+
+	audio_set_media_context(call->audio, &call->ctx);
 
 	/* We require at least one video codec, and at least one
 	   video source or video display */
