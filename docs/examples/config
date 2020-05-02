@@ -33,10 +33,6 @@ auplay_format		s16		# s16, float, ..
 auenc_format		s16		# s16, float, ..
 audec_format		s16		# s16, float, ..
 
-# EBU ACIP
-#sdp_ebuacip         	yes     # enable EBU ACIP parameters in SDP
-#ebuacip_jb_type     	fixed   # auto,fixed
-
 # Video
 #video_source		v4l2,/dev/video0
 #video_display		x11,nil
@@ -56,7 +52,6 @@ rtp_stats		no
 #rtp_timeout		60
 
 # Network
-net_prefer_ipv6		no
 #dns_server		1.1.1.1:53
 #dns_server		1.0.0.1:53
 #net_interface		wlan1
@@ -115,6 +110,9 @@ module			x11.so
 #module			rst.so
 #module			gst.so
 #module			gst_video.so
+
+# Compatibility modules
+#module			ebuacip.so
 
 # Media NAT modules
 module			stun.so
@@ -187,7 +185,6 @@ video_selfview		window # {window,pip}
 
 # ICE
 ice_debug		no
-ice_nomination		regular	# {regular,aggressive}
 
 # ZRTP
 #zrtp_hash		no  # Disable SDP zrtp-hash (not recommended)
@@ -216,3 +213,6 @@ ice_nomination		regular	# {regular,aggressive}
 
 # sndfile
 #snd_path		/tmp
+
+# EBU ACIP
+#ebuacip_jb_type     	fixed   # auto,fixed

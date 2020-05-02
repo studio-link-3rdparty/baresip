@@ -25,6 +25,7 @@ struct ausrc_st {
 	volatile bool rdy;
 	size_t inuse;
 	size_t sampsz;
+	enum aufmt fmt;
 	ausrc_read_h *rh;
 	void *arg;
 };
@@ -85,6 +86,7 @@ static void CALLBACK waveInCallback(HWAVEOUT hwo,
 {
 	struct ausrc_st *st = (struct ausrc_st *)dwInstance;
 	WAVEHDR *wh = (WAVEHDR *)dwParam1;
+	struct auframe af;
 
 	(void)hwo;
 	(void)dwParam2;
@@ -106,8 +108,12 @@ static void CALLBACK waveInCallback(HWAVEOUT hwo,
 		if (st->inuse < (READ_BUFFERS-1))
 			add_wave_in(st);
 
-		st->rh((void *)wh->lpData, wh->dwBytesRecorded/st->sampsz,
-		       st->arg);
+		af.fmt   = st->fmt;
+		af.sampv = (void *)wh->lpData;
+		af.sampc = wh->dwBytesRecorded/st->sampsz;
+		af.timestamp = tmr_jiffies_usec();
+
+		st->rh(&af, st->arg);
 
 		waveInUnprepareHeader(st->wavein, wh, sizeof(*wh));
 		st->inuse--;
@@ -141,6 +147,7 @@ static int read_stream_open(struct ausrc_st *st, const struct ausrc_prm *prm,
 	st->wavein = NULL;
 	st->pos = 0;
 	st->rdy = false;
+	st->fmt = prm->fmt;
 
 	sampc = prm->srate * prm->ch * prm->ptime / 1000;
 

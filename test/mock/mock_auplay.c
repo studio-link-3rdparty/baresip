@@ -27,6 +27,15 @@ static struct {
 } mock;
 
 
+static void auplay_destructor(void *arg)
+{
+	struct auplay_st *st = arg;
+
+	tmr_cancel(&st->tmr);
+	mem_deref(st->sampv);
+}
+
+
 static void tmr_handler(void *arg)
 {
 	struct auplay_st *st = arg;
@@ -39,15 +48,6 @@ static void tmr_handler(void *arg)
 	/* feed the audio-samples back to the test */
 	if (mock.sampleh)
 		mock.sampleh(st->sampv, st->sampc, mock.arg);
-}
-
-
-static void auplay_destructor(void *arg)
-{
-	struct auplay_st *st = arg;
-
-	tmr_cancel(&st->tmr);
-	mem_deref(st->sampv);
 }
 
 

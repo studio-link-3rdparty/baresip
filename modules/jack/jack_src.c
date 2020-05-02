@@ -29,8 +29,12 @@ struct ausrc_st {
 static int process_handler(jack_nframes_t nframes, void *arg)
 {
 	struct ausrc_st *st = arg;
+	struct auframe af;
 	size_t sampc = nframes * st->prm.ch;
 	size_t ch, j;
+	uint64_t ts;
+
+	ts = jack_frames_to_time(st->client, jack_last_frame_time(st->client));
 
 	/* 2. convert from 16-bit to float and copy to Jack */
 
@@ -47,8 +51,13 @@ static int process_handler(jack_nframes_t nframes, void *arg)
 		}
 	}
 
+	af.fmt   = st->prm.fmt;
+	af.sampv = st->sampv;
+	af.sampc = sampc;
+	af.timestamp = ts;
+
 	/* 1. read data from app (signed 16-bit) interleaved */
-	st->rh(st->sampv, sampc, st->arg);
+	st->rh(&af, st->arg);
 
 	return 0;
 }

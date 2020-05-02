@@ -206,26 +206,24 @@ static int aufile_load(struct mbuf *mb, const char *filename,
  * @param srate    Sampling rate
  * @param ch       Number of channels
  * @param repeat   Number of times to repeat
+ * @param play_mod Audio player module
+ * @param play_dev Audio player device
  *
  * @return 0 if success, otherwise errorcode
  */
 int play_tone(struct play **playp, struct player *player,
 	      struct mbuf *tone, uint32_t srate,
-	      uint8_t ch, int repeat)
+	      uint8_t ch, int repeat,
+	      const char *play_mod, const char *play_dev)
 {
 	struct auplay_prm wprm;
 	struct play *play;
-	struct config *cfg;
 	int err;
 
 	if (!player)
 		return EINVAL;
 	if (playp && *playp)
 		return EALREADY;
-
-	cfg = conf_config();
-	if (!cfg)
-		return ENOENT;
 
 	play = mem_zalloc(sizeof(*play), destructor);
 	if (!play)
@@ -245,8 +243,8 @@ int play_tone(struct play **playp, struct player *player,
 	wprm.fmt        = AUFMT_S16LE;
 
 	err = auplay_alloc(&play->auplay, baresip_auplayl(),
-			   cfg->audio.alert_mod, &wprm,
-			   cfg->audio.alert_dev, write_handler, play);
+			   play_mod, &wprm,
+			   play_dev, write_handler, play);
 	if (err)
 		goto out;
 
@@ -273,11 +271,14 @@ int play_tone(struct play **playp, struct player *player,
  * @param player   Audio-file player
  * @param filename Name of WAV file to play
  * @param repeat   Number of times to repeat
+ * @param play_mod Audio player module
+ * @param play_dev Audio player device
  *
  * @return 0 if success, otherwise errorcode
  */
 int play_file(struct play **playp, struct player *player,
-	      const char *filename, int repeat)
+	      const char *filename, int repeat,
+	      const char *play_mod, const char *play_dev)
 {
 	struct mbuf *mb;
 	char path[FS_PATH_MAX];
@@ -304,7 +305,8 @@ int play_file(struct play **playp, struct player *player,
 		goto out;
 	}
 
-	err = play_tone(playp, player, mb, srate, ch, repeat);
+	err = play_tone(playp, player, mb, srate,
+	                ch, repeat, play_mod, play_dev);
 
  out:
 	mem_deref(mb);

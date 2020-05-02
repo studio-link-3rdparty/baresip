@@ -13,13 +13,18 @@ extern "C" {
 
 
 /** Defines the Baresip version string */
-#define BARESIP_VERSION "0.6.5"
+#define BARESIP_VERSION "0.6.6"
 
 
 #ifndef NET_MAX_NS
 #define NET_MAX_NS (4)
 #endif
 
+
+/*
+ * Clock-rate for audio timestamp
+ */
+#define AUDIO_TIMEBASE 1000000U
 
 /*
  * Clock-rate for video timestamp
@@ -73,6 +78,7 @@ int account_auth(const struct account *acc, char **username, char **password,
 struct list *account_aucodecl(const struct account *acc);
 struct list *account_vidcodecl(const struct account *acc);
 struct sip_addr *account_laddr(const struct account *acc);
+struct uri *account_luri(const struct account *acc);
 uint32_t account_regint(const struct account *acc);
 uint32_t account_pubint(const struct account *acc);
 uint32_t account_ptime(const struct account *acc);
@@ -92,6 +98,25 @@ const char *account_medianat(const struct account *acc);
 const char *account_mwi(const struct account *acc);
 const char *account_call_transfer(const struct account *acc);
 const char *account_extra(const struct account *acc);
+
+
+/*
+ * Audio frame
+ */
+
+/**
+ * Defines a frame of audio samples
+ */
+struct auframe {
+	int fmt;             /**< Sample format (enum aufmt)        */
+	void *sampv;         /**< Audio samples (must be mem_ref'd) */
+	size_t sampc;        /**< Total number of audio samples     */
+	uint64_t timestamp;  /**< Timestamp in AUDIO_TIMEBASE units */
+};
+
+void   auframe_init(struct auframe *af, int fmt, void *sampv, size_t sampc);
+size_t auframe_size(const struct auframe *af);
+void   auframe_mute(struct auframe *af);
 
 
 /*
@@ -121,6 +146,12 @@ enum call_event {
 	CALL_EVENT_MENC,
 };
 
+/** Video mode */
+enum vidmode {
+	VIDMODE_OFF = 0,    /**< Video disabled                */
+	VIDMODE_ON,         /**< Video enabled                 */
+};
+
 struct call;
 
 typedef void (call_event_h)(struct call *call, enum call_event ev,
@@ -128,9 +159,9 @@ typedef void (call_event_h)(struct call *call, enum call_event ev,
 typedef void (call_dtmf_h)(struct call *call, char key, void *arg);
 
 int  call_connect(struct call *call, const struct pl *paddr);
-int  call_answer(struct call *call, uint16_t scode);
+int  call_answer(struct call *call, uint16_t scode, enum vidmode vmode);
 int  call_progress(struct call *call);
-int  call_hangup(struct call *call, uint16_t scode, const char *reason);
+void call_hangup(struct call *call, uint16_t scode, const char *reason);
 int  call_modify(struct call *call);
 int  call_hold(struct call *call, bool hold);
 int  call_send_digit(struct call *call, char key);
@@ -411,7 +442,7 @@ struct ausrc_prm {
 	int        fmt;         /**< Sample format (enum aufmt) */
 };
 
-typedef void (ausrc_read_h)(const void *sampv, size_t sampc, void *arg);
+typedef void (ausrc_read_h)(struct auframe *af, void *arg);
 typedef void (ausrc_error_h)(int err, const char *str, void *arg);
 
 typedef int  (ausrc_alloc_h)(struct ausrc_st **stp, const struct ausrc *ausrc,
@@ -505,13 +536,13 @@ typedef int (aufilt_encupd_h)(struct aufilt_enc_st **stp, void **ctx,
 			      const struct aufilt *af, struct aufilt_prm *prm,
 			      const struct audio *au);
 typedef int (aufilt_encode_h)(struct aufilt_enc_st *st,
-			      void *sampv, size_t *sampc);
+			      struct auframe *af);
 
 typedef int (aufilt_decupd_h)(struct aufilt_dec_st **stp, void **ctx,
 			      const struct aufilt *af, struct aufilt_prm *prm,
 			      const struct audio *au);
 typedef int (aufilt_decode_h)(struct aufilt_dec_st *st,
-			      void *sampv, size_t *sampc);
+			      struct auframe *af);
 
 struct aufilt {
 	struct le le;
@@ -640,10 +671,12 @@ struct play;
 struct player;
 
 int  play_file(struct play **playp, struct player *player,
-	       const char *filename, int repeat);
+	       const char *filename, int repeat,
+	       const char *play_mod, const char *play_dev);
 int  play_tone(struct play **playp, struct player *player,
 	       struct mbuf *tone,
-	       uint32_t srate, uint8_t ch, int repeat);
+	       uint32_t srate, uint8_t ch, int repeat,
+	       const char *play_mod, const char *play_dev);
 int  play_init(struct player **playerp);
 void play_set_path(struct player *player, const char *path);
 
@@ -685,12 +718,6 @@ enum ua_event {
 	UA_EVENT_MAX,
 };
 
-/** Video mode */
-enum vidmode {
-	VIDMODE_OFF = 0,    /**< Video disabled                */
-	VIDMODE_ON,         /**< Video enabled                 */
-};
-
 /** Defines the User-Agent event handler */
 typedef void (ua_event_h)(struct ua *ua, enum ua_event ev,
 			  struct call *call, const char *prm, void *arg);
@@ -705,8 +732,8 @@ int  ua_connect(struct ua *ua, struct call **callp,
 		enum vidmode vmode);
 void ua_hangup(struct ua *ua, struct call *call,
 	       uint16_t scode, const char *reason);
-int  ua_answer(struct ua *ua, struct call *call);
-int  ua_hold_answer(struct ua *ua, struct call *call);
+int  ua_answer(struct ua *ua, struct call *call, enum vidmode vmode);
+int  ua_hold_answer(struct ua *ua, struct call *call, enum vidmode vmode);
 int  ua_options_send(struct ua *ua, const char *uri,
 		     options_resp_h *resph, void *arg);
 int  ua_debug(struct re_printf *pf, const struct ua *ua);
@@ -1152,9 +1179,12 @@ void audio_level_put(const struct audio *au, bool tx, double lvl);
 int  audio_level_get(const struct audio *au, double *level);
 int  audio_debug(struct re_printf *pf, const struct audio *a);
 struct stream *audio_strm(const struct audio *au);
+uint64_t audio_jb_current_value(const struct audio *au);
 int  audio_set_bitrate(struct audio *au, uint32_t bitrate);
 bool audio_rxaubuf_started(const struct audio *au);
 int  audio_start(struct audio *a);
+int  audio_start_source(struct audio *a, struct list *ausrcl,
+			struct list *aufiltl);
 void audio_stop(struct audio *a);
 bool audio_started(const struct audio *a);
 void audio_set_hold(struct audio *au, bool hold);
@@ -1208,9 +1238,9 @@ const struct vidcodec *video_codec(const struct video *vid, bool tx);
 
 /** Common parameters for media stream */
 struct stream_param {
-	bool use_rtp;
-	int af;
-	const char *cname;
+	bool use_rtp;       /**< Enable or disable RTP */
+	int af;             /**< Wanted address family */
+	const char *cname;  /**< Canonical name        */
 };
 
 typedef void (stream_mnatconn_h)(struct stream *strm, void *arg);
@@ -1245,17 +1275,19 @@ int  stream_debug(struct re_printf *pf, const struct stream *s);
  * STUN URI
  */
 
+/** Defines the STUN uri scheme */
 enum stun_scheme {
-	STUN_SCHEME_STUN,
-	STUN_SCHEME_STUNS,
-	STUN_SCHEME_TURN,
-	STUN_SCHEME_TURNS,
+	STUN_SCHEME_STUN,  /**< STUN scheme        */
+	STUN_SCHEME_STUNS, /**< Secure STUN scheme */
+	STUN_SCHEME_TURN,  /**< TURN scheme        */
+	STUN_SCHEME_TURNS, /**< Secure TURN scheme */
 };
 
+/** Defines a STUN/TURN uri */
 struct stun_uri {
-	enum stun_scheme scheme;
-	char *host;
-	uint16_t port;
+	enum stun_scheme scheme;  /**< STUN Scheme            */
+	char *host;               /**< Hostname or IP-address */
+	uint16_t port;            /**< Port number            */
 };
 
 int stunuri_decode(struct stun_uri **sup, const struct pl *pl);
@@ -1426,6 +1458,7 @@ void module_app_unload(void);
 
 int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 		      struct call *call, const char *prm);
+int event_add_au_jb_stat(struct odict *od_parent, const struct call *call);
 
 
 /*

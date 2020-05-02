@@ -26,6 +26,7 @@
 
 struct ausrc_st {
 	const struct ausrc *as;  /* base class */
+
 	struct tmr tmr;
 	struct aufile *aufile;
 	struct aubuf *aubuf;
@@ -70,6 +71,13 @@ static void *play_thread(void *arg)
 
 	while (st->run) {
 
+		struct auframe af = {
+			.fmt   = AUFMT_S16LE,
+			.sampv = sampv,
+			.sampc = st->sampc,
+			.timestamp = ts * 1000
+		};
+
 		sys_msleep(4);
 
 		now = tmr_jiffies();
@@ -79,7 +87,7 @@ static void *play_thread(void *arg)
 
 		aubuf_read_samp(st->aubuf, sampv, st->sampc);
 
-		st->rh(sampv, st->sampc, st->arg);
+		st->rh(&af, st->arg);
 
 		ts += st->ptime;
 	}

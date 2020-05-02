@@ -38,7 +38,7 @@ struct audio_loop {
 	struct lock *lock;
 	struct tmr tmr;
 	uint32_t srate;
-	uint32_t ch;
+	uint8_t ch;
 	enum aufmt fmt;
 	bool started;
 
@@ -196,16 +196,21 @@ static void tmr_handler(void *arg)
 }
 
 
-static void src_read_handler(const void *sampv, size_t sampc, void *arg)
+static void src_read_handler(struct auframe *af, void *arg)
 {
 	struct audio_loop *al = arg;
-	size_t num_bytes = sampc * aufmt_sample_size(al->fmt);
 	struct stats *stats = &al->stats_src;
 	int err;
 
+	if (af->fmt != (int)al->fmt) {
+		warning("auloop: format mismatch: exp=%d, actual=%d\n",
+			al->fmt, af->fmt);
+		return;
+	}
+
 	lock_write_get(al->lock);
 
-	stats->n_samp   += sampc;
+	stats->n_samp   += af->sampc;
 	stats->n_frames += 1;
 
 	if (aubuf_cur_size(al->aubuf) >= al->aubuf_maxsz) {
@@ -214,7 +219,7 @@ static void src_read_handler(const void *sampv, size_t sampc, void *arg)
 
 	lock_rel(al->lock);
 
-	err = aubuf_write(al->aubuf, sampv, num_bytes);
+	err = aubuf_write(al->aubuf, af->sampv, auframe_size(af));
 	if (err) {
 		warning("auloop: aubuf_write: %m\n", err);
 	}
@@ -251,7 +256,7 @@ static void error_handler(int err, const char *str, void *arg)
 }
 
 
-static int auloop_reset(struct audio_loop *al, uint32_t srate, uint32_t ch)
+static int auloop_reset(struct audio_loop *al, uint32_t srate, uint8_t ch)
 {
 	struct auplay_prm auplay_prm;
 	struct ausrc_prm ausrc_prm;
@@ -325,7 +330,7 @@ static int auloop_reset(struct audio_loop *al, uint32_t srate, uint32_t ch)
 
 
 static int audio_loop_alloc(struct audio_loop **alp,
-			    uint32_t srate, uint32_t ch)
+			    uint32_t srate, uint8_t ch)
 {
 	struct audio_loop *al;
 	int err;
@@ -382,7 +387,7 @@ static int auloop_start(struct re_printf *pf, void *arg)
 	if (!srate || !ch)
 		return re_hprintf(pf, "invalid samplerate or channels\n");
 
-	err = audio_loop_alloc(&gal, srate, ch);
+	err = audio_loop_alloc(&gal, srate, (uint8_t)ch);
 	if (err) {
 		warning("auloop: alloc failed %m\n", err);
 	}

@@ -197,7 +197,6 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 	enum poll_method method;
 	struct vidsz size = {0, 0};
 	struct pl txmode;
-	bool prefer_ipv6 = false;
 	uint32_t v;
 	int err = 0;
 
@@ -318,10 +317,6 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 	}
 
 	/* Network */
-#if HAVE_INET6
-	if (0 == conf_get_bool(conf, "net_prefer_ipv6", &prefer_ipv6))
-		info("config: net_prefer_ipv6 ignored\n");
-#endif
 	(void)conf_apply(conf, "dns_server", dns_server_handler, &cfg->net);
 	(void)conf_get_str(conf, "net_interface",
 			   cfg->net.ifname, sizeof(cfg->net.ifname));
@@ -791,7 +786,6 @@ int config_write_template(const char *file, const struct config *cfg)
 	(void)re_fprintf(f, "#module\t\t\t" "v4l2" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "v4l2_codec" MOD_EXT "\n");
 #endif
-	(void)re_fprintf(f, "#module\t\t\t" "avformat" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "x11grab" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "cairo" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "vidbridge" MOD_EXT "\n");
@@ -806,9 +800,13 @@ int config_write_template(const char *file, const struct config *cfg)
 
 
 	(void)re_fprintf(f, "\n# Audio/Video source modules\n");
+	(void)re_fprintf(f, "#module\t\t\t" "avformat" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "rst" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "gst" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "gst_video" MOD_EXT "\n");
+
+	(void)re_fprintf(f, "\n# Compatibility modules\n");
+	(void)re_fprintf(f, "#module\t\t\t" "ebuacip" MOD_EXT "\n");
 
 	(void)re_fprintf(f, "\n# Media NAT modules\n");
 	(void)re_fprintf(f, "module\t\t\t" "stun" MOD_EXT "\n");
@@ -901,8 +899,7 @@ int config_write_template(const char *file, const struct config *cfg)
 
 	(void)re_fprintf(f,
 			"\n# ICE\n"
-			"ice_debug\t\tno\n"
-			"ice_nomination\t\tregular\t# {regular,aggressive}\n");
+			"ice_debug\t\tno\n");
 
 	(void)re_fprintf(f,
 			"\n# ZRTP\n"
@@ -938,6 +935,10 @@ int config_write_template(const char *file, const struct config *cfg)
 	(void)re_fprintf(f,
 			 "\n# sndfile\n"
 			 "#snd_path\t\t/tmp\n");
+
+	(void)re_fprintf(f,
+			 "\n# EBU ACIP\n"
+			 "#ebuacip_jb_type\tfixed\t# auto,fixed\n");
 
 	if (f)
 		(void)fclose(f);

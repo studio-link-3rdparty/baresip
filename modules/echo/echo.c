@@ -83,7 +83,7 @@ static int new_session(struct ua *ua, struct call *call)
 			call_dtmf_handler, sess);
 
 	list_append(&sessionl, &sess->le, sess);
-	err = ua_answer(ua, call);
+	err = ua_answer(ua, call, VIDMODE_ON);
 
 	if (err)
 		mem_deref(sess);
@@ -102,13 +102,13 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 	switch (ev) {
 
 	case UA_EVENT_CALL_INCOMING:
-		debug("echo: CALL_INCOMING: peer=%s  -->  local=%s\n",
+		info("echo: CALL_INCOMING: peer=%s  -->  local=%s\n",
 				call_peeruri(call),
 				call_localuri(call));
 
 		err = new_session(ua, call);
 		if (err) {
-			ua_hangup(ua, call, 500, "Server Error");
+			call_hangup(call, 500, "Server Error");
 		}
 		break;
 

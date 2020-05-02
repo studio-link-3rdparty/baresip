@@ -130,13 +130,18 @@ int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 
 		const char *dir;
 		const char *call_identifier;
+		const char *peerdisplayname;
 
 		dir = call_is_outgoing(call) ? "outgoing" : "incoming";
 
 		err |= odict_entry_add(od, "direction", ODICT_STRING, dir);
 		err |= odict_entry_add(od, "peeruri",
 				       ODICT_STRING, call_peeruri(call));
-
+		peerdisplayname = call_peername(call);
+		if (peerdisplayname){
+				err |= odict_entry_add(od, "peerdisplayname",
+						ODICT_STRING, peerdisplayname);
+		}
 		call_identifier = call_id(call);
 		if (call_identifier) {
 			err |= odict_entry_add(od, "id", ODICT_STRING,
@@ -168,6 +173,23 @@ int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 
  out:
 
+	return err;
+}
+
+
+/**
+ * Add audio buffer status
+ *
+ * @param od_parent  Dictionary to encode into
+ * @param call       Call object
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int event_add_au_jb_stat(struct odict *od_parent, const struct call *call)
+{
+	int err = 0;
+	err = odict_entry_add(od_parent, "audio_jb_ms",ODICT_INT,
+			    (int64_t)audio_jb_current_value(call_audio(call)));
 	return err;
 }
 

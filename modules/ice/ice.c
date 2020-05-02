@@ -3,10 +3,6 @@
  *
  * Copyright (C) 2010 Creytiv.com
  */
-#ifdef __APPLE__
-#include <CoreFoundation/CoreFoundation.h>
-#include <SystemConfiguration/SCNetworkReachability.h>
-#endif
 #include <re.h>
 #include <baresip.h>
 
@@ -17,13 +13,8 @@
  * Interactive Connectivity Establishment (ICE) for media NAT traversal
  *
  * This module enables ICE for NAT traversal. You can enable ICE
- * in your accounts file with the parameter ;medianat=ice. The following
- * options can be configured:
+ * in your accounts file with the parameter ;medianat=ice.
  *
- \verbatim
-  ice_debug       {yes,no}             # Enable ICE debugging/tracing
-  ice_nomination  {regular,aggressive} # Regular or aggressive nomination
- \endverbatim
  */
 
 
@@ -37,10 +28,10 @@ struct mnat_sess {
 	struct sa srv;
 	struct stun_dns *dnsq;
 	struct sdp_session *sdp;
+	struct tmr tmr_async;
 	char lufrag[8];
 	char lpwd[32];
 	uint64_t tiebrk;
-	enum ice_mode mode;
 	bool turn;
 	bool offerer;
 	char *user;
@@ -69,15 +60,6 @@ struct mnat_media {
 	int nstun;                   /**< Number of pending STUN candidates  */
 	mnat_connected_h *connh;
 	void *arg;
-};
-
-
-static struct {
-	enum ice_nomination nom;
-	bool debug;
-} ice = {
-	ICE_NOMINATION_REGULAR,
-	false
 };
 
 
@@ -270,9 +252,6 @@ static int start_gathering(struct mnat_media *m,
 	unsigned i;
 	int err = 0;
 
-	if (m->sess->mode != ICE_MODE_FULL)
-		return EINVAL;
-
 	/* for each component */
 	for (i=0; i<2; i++) {
 		struct comp *comp = &m->compv[i];
@@ -311,34 +290,6 @@ static int icem_gather_relay(struct mnat_media *m,
 }
 
 
-static bool is_cellular(const struct sa *laddr)
-{
-#if TARGET_OS_IPHONE
-	SCNetworkReachabilityRef r;
-	SCNetworkReachabilityFlags flags = 0;
-	bool cell = false;
-
-	r = SCNetworkReachabilityCreateWithAddressPair(NULL,
-						       &laddr->u.sa, NULL);
-	if (!r)
-		return false;
-
-	if (SCNetworkReachabilityGetFlags(r, &flags)) {
-
-		if (flags & kSCNetworkReachabilityFlagsIsWWAN)
-			cell = true;
-	}
-
-	CFRelease(r);
-
-	return cell;
-#else
-	(void)laddr;
-	return false;
-#endif
-}
-
-
 static void ice_printf(struct mnat_media *m, const char *fmt, ...)
 {
 	va_list ap;
@@ -353,6 +304,7 @@ static void session_destructor(void *arg)
 {
 	struct mnat_sess *sess = arg;
 
+	tmr_cancel(&sess->tmr_async);
 	list_flush(&sess->medial);
 	mem_deref(sess->dnsq);
 	mem_deref(sess->user);
@@ -431,7 +383,7 @@ static bool if_handler(const char *ifname, const struct sa *sa, void *arg)
 	if (!net_af_enabled(baresip_network(), sa_af(sa)))
 		return false;
 
-	lprio = is_cellular(sa) ? 0 : 10;
+	lprio = 0;
 
 	ice_printf(m, "added interface: %s:%j (local prio %u)\n",
 		   ifname, sa, lprio);
@@ -455,29 +407,12 @@ static int media_start(struct mnat_sess *sess, struct mnat_media *m)
 
 	net_if_apply(if_handler, m);
 
-	switch (sess->mode) {
-
-	default:
-	case ICE_MODE_FULL:
-		if (sess->turn) {
-			err = icem_gather_relay(m,
-						sess->user, sess->pass);
-		}
-		else {
-			err = icem_gather_srflx(m);
-		}
-		break;
-
-	case ICE_MODE_LITE:
-		err = icem_lite_set_default_candidates(m->icem);
-		if (err) {
-			warning("ice: could not set"
-				" default candidates (%m)\n", err);
-			return err;
-		}
-
-		gather_handler(0, 0, NULL, m);
-		break;
+	if (sess->turn) {
+		err = icem_gather_relay(m,
+					sess->user, sess->pass);
+	}
+	else {
+		err = icem_gather_srflx(m);
 	}
 
 	return err;
@@ -513,6 +448,22 @@ static void dns_handler(int err, const struct sa *srv, void *arg)
 }
 
 
+static void tmr_async_handler(void *arg)
+{
+	struct mnat_sess *sess = arg;
+	struct le *le;
+
+	for (le = sess->medial.head; le; le = le->next) {
+
+		struct mnat_media *m = le->data;
+
+		net_if_apply(if_handler, m);
+
+		call_gather_handler(0, m, 0, "");
+	}
+}
+
+
 static int session_alloc(struct mnat_sess **sessp,
 			 const struct mnat *mnat, struct dnsc *dnsc,
 			 int af, const struct stun_uri *srv,
@@ -521,38 +472,36 @@ static int session_alloc(struct mnat_sess **sessp,
 			 mnat_estab_h *estabh, void *arg)
 {
 	struct mnat_sess *sess;
-	const char *usage;
+	const char *usage = NULL;
 	int err = 0;
+	(void)mnat;
 
-	if (!sessp || !dnsc || !srv || !ss || !estabh)
+	if (!sessp || !dnsc || !ss || !estabh)
 		return EINVAL;
 
-	info("ice: new session with %s-server at %s (username=%s)\n",
-	     srv->scheme == STUN_SCHEME_TURN ? "TURN" : "STUN",
-	     srv->host, user);
+	if (srv) {
+		info("ice: new session with %s-server at %s (username=%s)\n",
+		     srv->scheme == STUN_SCHEME_TURN ? "TURN" : "STUN",
+		     srv->host, user);
 
-	switch (srv->scheme) {
+		switch (srv->scheme) {
 
-	case STUN_SCHEME_STUN:
-		usage = stun_usage_binding;
-		break;
+		case STUN_SCHEME_STUN:
+			usage = stun_usage_binding;
+			break;
 
-	case STUN_SCHEME_TURN:
-		usage = stun_usage_relay;
-		break;
+		case STUN_SCHEME_TURN:
+			usage = stun_usage_relay;
+			break;
 
-	default:
-		return ENOTSUP;
+		default:
+			return ENOTSUP;
+		}
 	}
 
 	sess = mem_zalloc(sizeof(*sess), session_destructor);
 	if (!sess)
 		return ENOMEM;
-
-	if (0 == str_casecmp(mnat->id, "ice"))
-		sess->mode = ICE_MODE_FULL;
-	else if (0 == str_casecmp(mnat->id, "ice-lite"))
-		sess->mode = ICE_MODE_LITE;
 
 	sess->sdp    = mem_ref(ss);
 	sess->estabh = estabh;
@@ -570,11 +519,6 @@ static int session_alloc(struct mnat_sess **sessp,
 	sess->tiebrk = rand_u64();
 	sess->offerer = offerer;
 
-	if (ICE_MODE_LITE == sess->mode) {
-		err |= sdp_session_set_lattr(ss, true,
-					     ice_attr_lite, NULL);
-	}
-
 	err |= sdp_session_set_lattr(ss, true,
 				     ice_attr_ufrag, sess->lufrag);
 	err |= sdp_session_set_lattr(ss, true,
@@ -582,11 +526,17 @@ static int session_alloc(struct mnat_sess **sessp,
 	if (err)
 		goto out;
 
-	sess->turn = (srv->scheme == STUN_SCHEME_TURN);
+	if (srv) {
+		sess->turn = (srv->scheme == STUN_SCHEME_TURN);
 
-	err = stun_server_discover(&sess->dnsq, dnsc, usage, stun_proto_udp,
-				   af, srv->host, srv->port,
-				   dns_handler, sess);
+		err = stun_server_discover(&sess->dnsq, dnsc,
+					   usage, stun_proto_udp,
+					   af, srv->host, srv->port,
+					   dns_handler, sess);
+	}
+	else {
+		tmr_start(&sess->tmr_async, 1, tmr_async_handler, sess);
+	}
 
  out:
 	if (err)
@@ -815,16 +765,14 @@ static int ice_start(struct mnat_sess *sess)
 		if (sdp_media_has_media(m->sdpm)) {
 			m->complete = false;
 
-			if (sess->mode == ICE_MODE_FULL) {
-				err = icem_conncheck_start(m->icem);
-				if (err)
-					return err;
+			err = icem_conncheck_start(m->icem);
+			if (err)
+				return err;
 
-				/* set the pair states
-				   -- first media stream only */
-				if (sess->medial.head == le) {
-					ice_candpair_set_states(m->icem);
-				}
+			/* set the pair states
+			   -- first media stream only */
+			if (sess->medial.head == le) {
+				ice_candpair_set_states(m->icem);
 			}
 		}
 		else {
@@ -866,15 +814,14 @@ static int media_alloc(struct mnat_media **mp, struct mnat_sess *sess,
 	else
 		role = ICE_ROLE_CONTROLLED;
 
-	err = icem_alloc(&m->icem, sess->mode, role,
+	err = icem_alloc(&m->icem, ICE_MODE_FULL, role,
 			 IPPROTO_UDP, ICE_LAYER,
 			 sess->tiebrk, sess->lufrag, sess->lpwd,
 			 conncheck_handler, m);
 	if (err)
 		goto out;
 
-	icem_conf(m->icem)->nom   = ice.nom;
-	icem_conf(m->icem)->debug = ice.debug;
+	icem_conf(m->icem)->debug = LEVEL_DEBUG==log_level_get();
 	icem_conf(m->icem)->rc    = 4;
 
 	icem_set_conf(m->icem, icem_conf(m->icem));
@@ -1003,35 +950,10 @@ static struct mnat mnat_ice = {
 	.updateh = update,
 };
 
-static struct mnat mnat_icelite = {
-	.id      = "ice-lite",
-	.ftag    = "+sip.ice",
-	.wait_connected = true,
-	.sessh   = session_alloc,
-	.mediah  = media_alloc,
-	.updateh = update,
-};
-
 
 static int module_init(void)
 {
-	struct pl pl;
-
-	conf_get_bool(conf_cur(), "ice_debug", &ice.debug);
-
-	if (!conf_get(conf_cur(), "ice_nomination", &pl)) {
-		if (0 == pl_strcasecmp(&pl, "regular"))
-			ice.nom = ICE_NOMINATION_REGULAR;
-		else if (0 == pl_strcasecmp(&pl, "aggressive"))
-			ice.nom = ICE_NOMINATION_AGGRESSIVE;
-		else {
-			warning("ice: unknown nomination: %r\n", &pl);
-			return EINVAL;
-		}
-	}
-
 	mnat_register(baresip_mnatl(), &mnat_ice);
-	mnat_register(baresip_mnatl(), &mnat_icelite);
 
 	return 0;
 }
@@ -1039,7 +961,6 @@ static int module_init(void)
 
 static int module_close(void)
 {
-	mnat_unregister(&mnat_icelite);
 	mnat_unregister(&mnat_ice);
 
 	return 0;

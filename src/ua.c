@@ -56,7 +56,7 @@ static struct {
 	bool use_udp;                  /**< Use UDP transport               */
 	bool use_tcp;                  /**< Use TCP transport               */
 	bool use_tls;                  /**< Use TLS transport               */
-	bool delayed_close;
+	bool delayed_close;            /**< Module will close SIP stack     */
 	sip_msg_h *subh;               /**< Subscribe handler               */
 	ua_exit_h *exith;              /**< UA Exit handler                 */
 	void *arg;                     /**< UA Exit handler argument        */
@@ -87,6 +87,30 @@ static struct {
 };
 
 
+static void ua_destructor(void *arg)
+{
+	struct ua *ua = arg;
+
+	list_unlink(&ua->le);
+
+	if (!list_isempty(&ua->regl))
+		ua_event(ua, UA_EVENT_UNREGISTERING, NULL, NULL);
+
+	list_flush(&ua->calls);
+	list_flush(&ua->regl);
+	mem_deref(ua->cuser);
+	mem_deref(ua->pub_gruu);
+	mem_deref(ua->acc);
+
+	if (uag.delayed_close && list_isempty(&uag.ual)) {
+		sip_close(uag.sip, false);
+	}
+
+	list_flush(&ua->custom_hdrs);
+	list_flush(&ua->hdr_filter);
+}
+
+
 /* This function is called when all SIP transactions are done */
 static void exit_handler(void *arg)
 {
@@ -114,6 +138,15 @@ void ua_printf(const struct ua *ua, const char *fmt, ...)
 }
 
 
+/**
+ * Send a User-Agent event to all UA event handlers
+ *
+ * @param ua   User-Agent object (optional)
+ * @param ev   User-agent event
+ * @param call Call object (optional)
+ * @param fmt  Formatted arguments
+ * @param ...  Variable arguments
+ */
 void ua_event(struct ua *ua, enum ua_event ev, struct call *call,
 	      const char *fmt, ...)
 {
@@ -362,7 +395,7 @@ static void call_event_handler(struct call *call, enum call_event ev,
 			break;
 
 		case ANSWERMODE_AUTO:
-			(void)call_answer(call, 200);
+			(void)call_answer(call, 200, VIDMODE_ON);
 			break;
 
 		case ANSWERMODE_MANUAL:
@@ -597,30 +630,6 @@ static void handle_options(struct ua *ua, const struct sip_msg *msg)
  out:
 	mem_deref(desc);
 	mem_deref(call);
-}
-
-
-static void ua_destructor(void *arg)
-{
-	struct ua *ua = arg;
-
-	list_unlink(&ua->le);
-
-	if (!list_isempty(&ua->regl))
-		ua_event(ua, UA_EVENT_UNREGISTERING, NULL, NULL);
-
-	list_flush(&ua->calls);
-	list_flush(&ua->regl);
-	mem_deref(ua->cuser);
-	mem_deref(ua->pub_gruu);
-	mem_deref(ua->acc);
-
-	if (uag.delayed_close && list_isempty(&uag.ual)) {
-		sip_close(uag.sip, false);
-	}
-
-	list_flush(&ua->custom_hdrs);
-	list_flush(&ua->hdr_filter);
 }
 
 
@@ -949,7 +958,7 @@ void ua_hangup(struct ua *ua, struct call *call,
 			return;
 	}
 
-	(void)call_hangup(call, scode, reason);
+	call_hangup(call, scode, reason);
 
 	ua_event(ua, UA_EVENT_CALL_CLOSED, call,
 		 reason ? reason : "Connection reset by user");
@@ -963,12 +972,13 @@ void ua_hangup(struct ua *ua, struct call *call,
 /**
  * Answer an incoming call
  *
- * @param ua   User-Agent
- * @param call Call to answer, or NULL for current call
+ * @param ua    User-Agent
+ * @param call  Call to answer, or NULL for current call
+ * @param vmode Wanted video mode
  *
  * @return 0 if success, otherwise errorcode
  */
-int ua_answer(struct ua *ua, struct call *call)
+int ua_answer(struct ua *ua, struct call *call, enum vidmode vmode)
 {
 	if (!ua)
 		return EINVAL;
@@ -979,19 +989,20 @@ int ua_answer(struct ua *ua, struct call *call)
 			return ENOENT;
 	}
 
-	return call_answer(call, 200);
+	return call_answer(call, 200, vmode);
 }
 
 
 /**
  * Put the current call on hold and answer the incoming call
  *
- * @param ua   User-Agent
- * @param call Call to answer, or NULL for current call
+ * @param ua    User-Agent
+ * @param call  Call to answer, or NULL for current call
+ * @param vmode Wanted video mode for the incoming call
  *
  * @return 0 if success, otherwise errorcode
  */
-int ua_hold_answer(struct ua *ua, struct call *call)
+int ua_hold_answer(struct ua *ua, struct call *call, enum vidmode vmode)
 {
 	struct call *pcall;
 	int err;
@@ -1016,7 +1027,7 @@ int ua_hold_answer(struct ua *ua, struct call *call)
 			return err;
 	}
 
-	return ua_answer(ua, call);
+	return ua_answer(ua, call, vmode);
 }
 
 

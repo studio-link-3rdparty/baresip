@@ -20,7 +20,7 @@
 struct ausrc_st {
 	const struct ausrc *as;  /* pointer to base-class (inheritance) */
 	pthread_t thread;
-	bool run;
+	volatile bool run;
 	snd_pcm_t *read;
 	void *sampv;
 	size_t sampc;
@@ -53,6 +53,7 @@ static void ausrc_destructor(void *arg)
 static void *read_thread(void *arg)
 {
 	struct ausrc_st *st = arg;
+	uint64_t frames = 0;
 	int num_frames;
 	int err;
 
@@ -67,7 +68,7 @@ static void *read_thread(void *arg)
 	}
 
 	while (st->run) {
-		size_t sampc;
+		struct auframe af;
 		long n;
 
 		n = snd_pcm_readi(st->read, st->sampv, num_frames);
@@ -79,9 +80,14 @@ static void *read_thread(void *arg)
 			continue;
 		}
 
-		sampc = n * st->prm.ch;
+		af.fmt   = st->prm.fmt;
+		af.sampv = st->sampv;
+		af.sampc = n * st->prm.ch;
+		af.timestamp = frames * AUDIO_TIMEBASE / st->prm.srate;
 
-		st->rh(st->sampv, sampc, st->arg);
+		frames += n;
+
+		st->rh(&af, st->arg);
 	}
 
  out:

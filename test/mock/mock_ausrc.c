@@ -21,23 +21,29 @@ struct ausrc_st {
 };
 
 
-static void tmr_handler(void *arg)
-{
-	struct ausrc_st *st = arg;
-
-	tmr_start(&st->tmr, st->prm.ptime, tmr_handler, st);
-
-	if (st->rh)
-		st->rh(st->sampv, st->sampc, st->arg);
-}
-
-
 static void ausrc_destructor(void *arg)
 {
 	struct ausrc_st *st = arg;
 
 	tmr_cancel(&st->tmr);
 	mem_deref(st->sampv);
+}
+
+
+static void tmr_handler(void *arg)
+{
+	struct ausrc_st *st = arg;
+	struct auframe af = {
+		.fmt   = st->prm.fmt,
+		.sampv = st->sampv,
+		.sampc = st->sampc,
+		.timestamp = tmr_jiffies_usec()
+	};
+
+	tmr_start(&st->tmr, st->prm.ptime, tmr_handler, st);
+
+	if (st->rh)
+		st->rh(&af, st->arg);
 }
 
 
