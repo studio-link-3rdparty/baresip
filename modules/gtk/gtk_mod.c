@@ -53,6 +53,7 @@ struct gtk_mod {
 	struct dial_dialog *dial_dialog;
 	GSList *call_windows;
 	GSList *incoming_call_menus;
+	bool clean_number;
 };
 
 static struct gtk_mod mod_obj;
@@ -301,13 +302,22 @@ static void notify_incoming_call(struct gtk_mod *mod,
 		struct call *call)
 {
 	char title[128];
-	re_snprintf(title, sizeof title, "Incoming call from %s",
-					call_peername(call));
 	const char *msg = call_peeruri(call);
 	GtkWidget *call_menu;
 	GtkWidget *menu_item;
+
 #if defined(USE_LIBNOTIFY)
 	NotifyNotification *notification;
+#elif GLIB_CHECK_VERSION(2,40,0)
+	char id[64];
+	GVariant *target;
+	GNotification *notification;
+#endif
+
+	re_snprintf(title, sizeof title, "Incoming call from %s",
+					call_peername(call));
+
+#if defined(USE_LIBNOTIFY)
 
 	if (!notify_is_initted())
 		return;
@@ -317,9 +327,7 @@ static void notify_incoming_call(struct gtk_mod *mod,
 	g_object_unref(notification);
 
 #elif GLIB_CHECK_VERSION(2,40,0)
-	char id[64];
-	GVariant *target;
-	GNotification *notification = g_notification_new(title);
+	notification = g_notification_new(title);
 
 	re_snprintf(id, sizeof id, "incoming-call-%p", call);
 	id[sizeof id - 1] = '\0';
@@ -623,6 +631,13 @@ void gtk_mod_connect(struct gtk_mod *mod, const char *uri)
 		return;
 
 	mqueue_push(mod->mq, MQ_CONNECT, (char *)uri);
+}
+
+bool gtk_mod_clean_number(struct gtk_mod *mod)
+{
+	if (!mod)
+		return false;
+	return mod->clean_number;
 }
 
 
@@ -1001,7 +1016,10 @@ static const struct cmd cmdv[] = {
 
 static int module_init(void)
 {
-	int err = 0;
+	int err;
+
+	mod_obj.clean_number = false;
+	conf_get_bool(conf_cur(), "gtk_clean_number", &mod_obj.clean_number);
 
 	err = mqueue_alloc(&mod_obj.mq, mqueue_handler, &mod_obj);
 	if (err)

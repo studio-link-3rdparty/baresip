@@ -350,10 +350,14 @@ static int update_audio(struct call *call)
 
 static int update_video(struct call *call)
 {
-	const struct sdp_format *sc;
+	const struct sdp_format *sc = NULL;
 	int err = 0;
 
-	sc = sdp_media_rformat(stream_sdpmedia(video_strm(call->video)), NULL);
+	struct sdp_media *m = stream_sdpmedia(video_strm(call->video));
+
+	if (!sdp_media_disabled(m))
+		sc = sdp_media_rformat(m, NULL);
+
 	if (sc) {
 		err = video_encoder_set(call->video, sc->data,
 					sc->pt, sc->params);
@@ -375,6 +379,7 @@ static int update_video(struct call *call)
 	else if (call->video) {
 		info("video stream is disabled..\n");
 		video_stop(call->video);
+		video_stop_display(call->video);
 	}
 
 	return err;
@@ -490,6 +495,8 @@ static void audio_error_handler(int err, const char *str, void *arg)
 	}
 
 	ua_event(call->ua, UA_EVENT_AUDIO_ERROR, call, "%d,%s", err, str);
+	call_stream_stop(call);
+	call_event_handler(call, CALL_EVENT_CLOSED, str);
 }
 
 
@@ -1078,7 +1085,8 @@ int call_answer(struct call *call, uint16_t scode, enum vidmode vmode)
 	if (vmode == VIDMODE_OFF)
 		call->video = mem_deref(call->video);
 
-	info("call: answering call from %s with %u\n", call->peer_uri, scode);
+	info("call: answering call on line %u from %s with %u\n",
+			call->linenum, call->peer_uri, scode);
 
 	if (call->got_offer) {
 

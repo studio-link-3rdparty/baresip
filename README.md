@@ -80,6 +80,7 @@ Distributed under BSD license
 
 * Audio-drivers:
   - Advanced Linux Sound Architecture (ALSA) audio-driver
+  - PulseAudio POSIX OSes audio-driver
   - Android OpenSLES audio-driver
   - Gstreamer playbin input audio-driver
   - JACK Audio Connection Kit audio-driver
@@ -145,7 +146,7 @@ Distributed under BSD license
 baresip is using GNU makefiles, and the following packages must be
 installed before building:
 
-* [libre](https://github.com/creytiv/re)
+* [libre](https://github.com/baresip/re)
 * [librem](https://github.com/creytiv/rem)
 * [openssl](https://www.openssl.org/)
 
@@ -228,6 +229,7 @@ aubridge      Audio bridge module
 audiounit     AudioUnit audio driver for MacOSX/iOS
 aufile        Audio module for using a WAV-file as audio input
 auloop        Audio-loop test module
+ausine        Audio sine wave input module
 avcapture     Video source using iOS AVFoundation video capture
 avcodec       Video codec using FFmpeg/libav libavcodec
 avformat      Video source using FFmpeg/libav libavformat
@@ -436,6 +438,7 @@ zrtp          ZRTP media encryption module
 ## Related projects
 
 * [libre](https://github.com/creytiv/re)
+* [libre - baresip fork](https://github.com/baresip/re)
 * [librem](https://github.com/creytiv/rem)
 * [retest](https://github.com/creytiv/retest)
 * [restund](http://creytiv.com/restund.html)
